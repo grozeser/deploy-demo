@@ -1,0 +1,45 @@
+# Стенд «сайт + API + HTTPS + бот + бэкапы». Локально: docker compose up -d --build, сайт на https://localhost:8448
+# На сервере: DOMAIN=example.ru и сертификат Let's Encrypt (см. README) вместо самоподписанного.
+services:
+  certs:
+    # самоподписанный сертификат для локальной проверки; на сервере его заменяет certbot
+    image: alpine:3.20
+    command: sh -c "[ -f /certs/fullchain.pem ] || (apk add --no-cache openssl >/dev/null && openssl req -x509 -nodes -newkey rsa:2048 -days 365 -subj /CN=localhost -keyout /certs/privkey.pem -out /certs/fullchain.pem)"
+    volumes: [certs:/certs]
+
+  nginx:
+    image: nginx:1.27-alpine
+    depends_on:
+      certs: { condition: service_completed_successfully }
+      api: { condition: service_healthy }
+    ports: ["8088:80", "8448:443"]
+    volumes:
+      - ./nginx/site.conf:/etc/nginx/conf.d/default.conf:ro
+      - ../remont-landing:/var/www/site:ro
+      - certs:/etc/nginx/certs:ro
+    restart: unless-stopped
+
+  api:
+    build: ./api
+    volumes: [data:/data]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  bot:
+    # Telegram-бот: токен из .env на сервере; restart — поднимется сам после сбоя или перезагрузки
+    build: ../bots-demo
+    env_file: [{ path: .env, required: false }]
+    command: python -m bots.booking
+    restart: unless-stopped
+    profiles: [bot]
+
+  backup:
+    image: alpine:3.20
+    volumes: [data:/data:ro, ./backups:/backups, ./backup/backup.sh:/backup.sh:ro]
+    command: sh /backup.sh
+    profiles: [tools]
+
+volumes: { certs: {}, data: {} }
